@@ -77,7 +77,7 @@ public:
     if (*FirstAnnotationOp > OpIndex || Inst.getNumOperands() < OpIndex)
       return std::nullopt;
 
-    auto Op = Inst.begin() + OpIndex;
+    const auto *Op = Inst.begin() + OpIndex;
     const int64_t ImmValue = Op->getImm();
     return extractAnnotationIndex(ImmValue);
   }
