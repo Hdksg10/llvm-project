@@ -436,6 +436,22 @@ static bool shouldDisassemble(const BinaryFunction &BF) {
   if (opts::processAllFunctions())
     return true;
 
+  auto name = BF.getOneName();
+  // filter function starts with "__kvm_nvhe_$d"
+  if (name.find("__kvm_nvhe_$d") != std::string::npos) {
+    // outs() << "BOLT-INFO: Function " << name << " is ignored\n";
+    return false;
+  }
+  // filter function starts with "__kvm_nvhe_$x"
+  if (name.find("__kvm_nvhe_$x") != std::string::npos) {
+    // outs() << "BOLT-INFO: Function " << name << " is ignored\n";
+    return false;
+  }
+  // filter function starts with "__pi_$d"
+  if (name.find("__pi_$d") != std::string::npos) {
+    // outs() << "BOLT-INFO: Function " << name << " is ignored\n";
+    return false;
+  }
   return !BF.isIgnored();
 }
 
@@ -555,9 +571,17 @@ Error RewriteInstance::discoverStorage() {
                       Phdr.p_align,
                       (Phdr.p_flags & ELF::PF_X) != 0,
                       (Phdr.p_flags & ELF::PF_W) != 0};
-      if (BC->TheTriple->getArch() == llvm::Triple::x86_64 &&
-          Phdr.p_vaddr >= BinaryContext::KernelStartX86_64)
-        BC->IsLinuxKernel = true;
+      switch (BC->TheTriple->getArch()) {
+        case llvm::Triple::x86_64:
+          if (Phdr.p_vaddr >= BinaryContext::KernelStartX86_64)
+            BC->IsLinuxKernel = true;
+          break;
+        case llvm::Triple::aarch64:
+          if (Phdr.p_vaddr >= BinaryContext::KernelStartAArch64)
+            BC->IsLinuxKernel = true;
+          break;
+        default:;
+        }
       break;
     case ELF::PT_INTERP:
       BC->HasInterpHeader = true;
@@ -700,6 +724,8 @@ Error RewriteInstance::run() {
                     (llvm::Triple::ArchType)InputFile->getArch())
              << "\n";
   BC->outs() << "BOLT-INFO: BOLT version: " << BoltRevision << "\n";
+  
+  BC->outs() << "BOLT-INFO: opts:" << opts::EnableBAT << " " << opts::Instrument << " " << opts::DiffOnly << " " << opts::BinaryAnalysisMode << "\n";
 
   if (Error E = discoverStorage())
     return E;
@@ -3303,13 +3329,13 @@ void RewriteInstance::preprocessProfileData() {
 
 void RewriteInstance::initializeMetadataManager() {
   if (BC->IsLinuxKernel)
-    MetadataManager.registerRewriter(createLinuxKernelRewriter(*BC));
+    MetadataManager.registerRewriter(createLinuxKernelRewriter(*this));
 
-  MetadataManager.registerRewriter(createBuildIDRewriter(*BC));
+  MetadataManager.registerRewriter(createBuildIDRewriter(*this));
 
-  MetadataManager.registerRewriter(createPseudoProbeRewriter(*BC));
+  MetadataManager.registerRewriter(createPseudoProbeRewriter(*this));
 
-  MetadataManager.registerRewriter(createSDTRewriter(*BC));
+  MetadataManager.registerRewriter(createSDTRewriter(*this));
 }
 
 void RewriteInstance::processSectionMetadata() {
@@ -4019,6 +4045,7 @@ void RewriteInstance::mapCodeSectionsInPlace(
                       << " to 0x" << Twine::utohexstr(Function.getAddress())
                       << '\n');
     MapSection(*FuncSection, Function.getAddress());
+    Function.getLayout().getMainFragment().setAddress(Function.getAddress());
     Function.setImageAddress(FuncSection->getAllocAddress());
     Function.setImageSize(FuncSection->getOutputSize());
     assert(Function.getImageSize() <= Function.getMaxSize() &&
@@ -5958,8 +5985,7 @@ void RewriteInstance::rewriteFile() {
                  << Section.getOutputSize() << "\n at offset "
                  << Section.getOutputFileOffset() << " with content size "
                  << Section.getOutputContents().size() << '\n';
-    OS.seek(Section.getOutputFileOffset());
-    Section.write(OS);
+      OS.pwrite(reinterpret_cast<const char *>(Section.getOutputData()),Section.getOutputSize(), Section.getOutputFileOffset());
   }
 
   for (BinarySection &Section : BC->allocatableSections())

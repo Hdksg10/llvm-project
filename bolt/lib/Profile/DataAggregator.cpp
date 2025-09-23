@@ -202,7 +202,7 @@ void DataAggregator::start() {
 
   if (opts::BasicAggregation) {
     launchPerfProcess("events without LBR", MainEventsPPI,
-                      "script -F pid,event,ip");
+                      "script -F pid,event,ip -G --no-itrace");
   } else if (!opts::ITraceAggregation.empty()) {
     // Disable parsing memory profile from trace data, unless requested by user.
     if (!opts::ParseMemProfile.getNumOccurrences())
@@ -476,7 +476,7 @@ void DataAggregator::parsePerfData(BinaryContext &BC) {
               "not read one from input binary\n";
   }
 
-  if (BC.IsLinuxKernel) {
+  if (true) {
     // Current MMap parsing logic does not work with linux kernel.
     // MMap entries for linux kernel uses PERF_RECORD_MMAP
     // format instead of typical PERF_RECORD_MMAP2 format.
