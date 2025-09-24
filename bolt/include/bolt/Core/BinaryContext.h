@@ -438,6 +438,13 @@ public:
     return const_cast<BinaryContext *>(this)->getBinaryFunctionAtAddress(
         Address);
   }
+  
+  bool isInRange(StringRef NameStart, StringRef NameEnd,
+    uint64_t Address) const {
+    ErrorOr<uint64_t> Start = getSymbolValue(NameStart);
+    ErrorOr<uint64_t> End = getSymbolValue(NameEnd);
+    return Start && End && *Start <= Address && Address < *End;
+  }
 
   /// Return size of an entry for the given jump table \p Type.
   uint64_t getJumpTableEntrySize(JumpTable::JumpTableType Type) const {
@@ -563,6 +570,11 @@ public:
   /// binary and functions created by BOLT.
   std::vector<BinaryFunction *> getAllBinaryFunctions();
 
+  void undefineInstLabel(const MCInst &Inst) {
+    if (MCSymbol *const Label = MIB->getInstLabel(Inst))
+      UndefinedSymbols.insert(Label);
+  }
+  
   /// Construct a jump table for \p Function at \p Address or return an existing
   /// one at that location.
   ///

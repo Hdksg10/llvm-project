@@ -364,6 +364,32 @@ public:
   Error preCFGInitializer() override {
     if (Error E = detectLinuxKernelVersion())
       return E;
+    auto ShouldIgnore = [this](const BinaryFunction &Function) {
+      std::optional<StringRef> SectionName = Function.getOriginSectionName();
+      if (!SectionName || *SectionName != ".text")
+        return true;
+
+      uint64_t Address = Function.getAddress();
+
+      if (BC.isX86()) {
+        BinaryData *BDStart = BC.getBinaryDataByName("irq_entries_start");
+        if (BDStart && BDStart->containsAddress(Address))
+          return true;
+
+        if (BC.isInRange("__static_call_text_start", "__static_call_text_end",
+                          Address))
+          return true;
+      }
+
+      if (BC.isInRange("__noinstr_text_start", "__noinstr_text_end", Address))
+        return true;
+
+      return false;
+    };
+
+    for (BinaryFunction *Function : BC.getAllBinaryFunctions())
+      if (ShouldIgnore(*Function))
+        Function->setIgnored();
 
     processLKSections();
 
@@ -1132,6 +1158,12 @@ Error LinuxKernelRewriter::readExceptionTable(StringRef SectionName) {
   case llvm::Triple::x86_64:
     ExceptionTableEntrySize = 12;
     break;
+  case llvm::Triple::aarch64:
+    if (LinuxKernelVersion >= LKVersion(5, 16))
+      ExceptionTableEntrySize = 12;
+    else
+      ExceptionTableEntrySize = 8;
+    break;
 
   default:
     llvm_unreachable("Unsupported architecture");
@@ -1477,6 +1509,10 @@ Error LinuxKernelRewriter::readAltInstructions() {
       AltInstrEntryInstrlenOffset = 10;
     }
     break;
+  case llvm::Triple::aarch64:
+    AltInstrEntrySize = 12;
+    AltInstrEntryInstrlenOffset = 10;
+    break;
   default:
     llvm_unreachable("Unsupported architecture");
   }
@@ -1803,6 +1839,8 @@ Error LinuxKernelRewriter::readStaticKeysJumpTable() {
         if (LongJumpLabels)
           return Size == 5;
         return Size == 2 || Size == 5;
+      case llvm::Triple::aarch64:
+        return Size == 4;
       default:
         return false;
       }
@@ -1899,6 +1937,12 @@ Error LinuxKernelRewriter::rewriteStaticKeysJumpTable() {
             if (Size == 2)
               ++NumShort;
             else if (Size == 5)
+              ++NumLong;
+            else
+              llvm_unreachable("Wrong size for static keys jump instruction.");
+            break;
+          case llvm::Triple::aarch64:
+            if (Size == 4)
               ++NumLong;
             else
               llvm_unreachable("Wrong size for static keys jump instruction.");
@@ -2005,6 +2049,12 @@ Error LinuxKernelRewriter::updateStaticKeysJumpTablePostEmit() {
       if (Size == 2)
         ++NumShort;
       else if (Size == 5)
+        ++NumLong;
+      else
+        llvm_unreachable("Unexpected size for static keys jump instruction.");
+      break;
+    case llvm::Triple::aarch64:
+      if (Size == 4)
         ++NumLong;
       else
         llvm_unreachable("Unexpected size for static keys jump instruction.");
