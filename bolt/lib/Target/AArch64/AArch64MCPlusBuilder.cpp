@@ -2254,7 +2254,7 @@ public:
     Inst.clear();
     Inst.addOperand(MCOperand::createImm(CC));
     Inst.addOperand(MCOperand::createExpr(getTargetExprFor(
-    Inst, MCSymbolRefExpr::create(TBB, MCSymbolRefExpr::VK_None, *Ctx),
+    Inst, MCSymbolRefExpr::create(TBB, 1, *Ctx),
     *Ctx, 0)));
   }
 

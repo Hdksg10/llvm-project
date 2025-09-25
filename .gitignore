@@ -77,3 +77,4 @@ pythonenv*
 # custom
 temp.log
 .clangd
+perf.fdata
