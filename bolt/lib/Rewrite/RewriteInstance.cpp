@@ -272,6 +272,10 @@ cl::bits<GadgetScannerKind> GadgetScannersToRun(
         clEnumValN(GS_ALL, "all", "All implemented scanners")),
     cl::ZeroOrMore, cl::CommaSeparated, cl::cat(BinaryAnalysisCategory));
 
+static cl::opt<std::string> Kallsyms("kallsyms",
+      cl::desc("path to kallsyms file, used to convert KASLR-enabled addresses back"),
+      cl::cat(BoltCategory));
+
 } // namespace opts
 
 // FIXME: implement a better way to mark sections for replacement.
@@ -743,7 +747,7 @@ Error RewriteInstance::run() {
     return E;
   adjustCommandLineOptions();
   discoverFileObjects();
-
+  discoverKallsyms();
   if (opts::Instrument && !BC->IsStaticExecutable)
     if (Error E = discoverRtFiniAddress())
       return E;
@@ -822,6 +826,11 @@ void RewriteInstance::discoverFileObjects() {
           << "BOLT-ERROR: input file was compiled or linked with coverage "
              "support. Cannot optimize.\n";
       exit(1);
+    }
+
+    if (BC->IsLinuxKernel && NameOrError && NameOrError->starts_with("_stext")) {
+      BC->KernelTextStartAArch64Binary = cantFail(Symbol.getAddress());
+      BC->outs() << "BOLT-INFO: _stext address: " << Twine::utohexstr(BC->KernelTextStartAArch64Binary) << "\n";
     }
 
     if (cantFail(Symbol.getFlags()) & SymbolRef::SF_Undefined)
@@ -1454,6 +1463,66 @@ Error RewriteInstance::discoverRtFiniAddress() {
 
   return createStringError(std::errc::not_supported,
                            "No relocation for first DT_FINI_ARRAY slot");
+}
+// void RewriteInstance::_discoverKallSysms() {
+
+//   BC->outs() << "BOLT-INFO: discovering kallsyms\n";
+
+//   std::string KernelASLROffsetFile = "/proc/kallsyms";
+//   if (opts::KallsysmsFile.empty()) {
+//     BC->errs() << "BOLT-ERROR: kallsyms file not specified\n";
+//     exit(1);
+//   } else {
+//     BC->outs() << "BOLT-INFO: using kallsyms file: " << opts::KallsysmsFile << "\n";
+//   }
+
+//   if (!sys::fs::exists(opts::KallsysmsFile)) {
+//     BC->errs() << "BOLT-ERROR: kallsyms file not found: " << opts::KallsysmsFile
+//                << '\n';
+//     exit(1);
+//   } else {
+//     BC->outs() << "BOLT-INFO: kallsyms file found: " << opts::KallsysmsFile << "\n";
+//   }
+// }
+
+void RewriteInstance::discoverKallsyms() {
+  if (!BC->IsLinuxKernel)
+    return;
+  
+  BC->outs() << "BOLT-INFO: Discovering kallsyms file: " << opts::Kallsyms << "\n";
+  // Check opts::KAllSyms
+  if (opts::Kallsyms.empty())
+  {
+    BC->errs() << "BOLT-ERROR: kallsyms file is not set\n";
+    exit(1);
+  }
+
+  if (!sys::fs::exists(opts::Kallsyms)) {
+      BC->errs() << "BOLT-ERROR: kallsyms file not found: " << opts::Kallsyms
+                 << '\n';
+      exit(1);
+  }
+  // Read kallsyms file
+  std::ifstream KAllSymsFile(opts::Kallsyms);
+  if (!KAllSymsFile.is_open()) {
+    BC->errs() << "BOLT-ERROR: failed to open kallsyms file: " << opts::Kallsyms << "\n";
+    exit(1);
+  }
+
+  // Read kallsyms file
+  std::string Line;
+  while (std::getline(KAllSymsFile, Line)) {
+    // Split line by space
+    auto [Addr, Res] = StringRef(Line).split(' ');
+    auto [Type, Name] = Res.split(' ');
+    if (Name == "_stext") {
+      unsigned long long Address;
+      Addr.getAsInteger(16, Address);
+      BC->KernelTextStartAArch64Runtime = Address;
+      BC->outs() << "BOLT-INFO: Runtime _stext address: " << Twine::utohexstr(BC->KernelTextStartAArch64Runtime) << "\n";
+      break;
+    }
+  }
 }
 
 void RewriteInstance::updateRtFiniReloc() {

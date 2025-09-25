@@ -100,6 +100,9 @@ private:
   /// found.
   Error discoverRtFiniAddress();
 
+  /// Read runtime symbols' addresses from export /proc/kallsyms
+  void discoverKallsyms();
+
   /// If DT_FINI_ARRAY is used for instrumentation, update the relocation of its
   /// first entry to point to the instrumentation library's fini address.
   void updateRtFiniReloc();

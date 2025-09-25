@@ -645,6 +645,11 @@ public:
 
   static constexpr uint64_t KernelStartAArch64 = 0xFFFF'0000'0000'0000;
 
+  /// Address of _stext symbol in vmlinux binary
+  uint64_t KernelTextStartAArch64Binary = 0;
+  /// Address of _stext symbol in 
+  uint64_t KernelTextStartAArch64Runtime = 0;
+  
   /// Map address to a constant island owner (constant data in code section)
   std::map<uint64_t, BinaryFunction *> AddressToConstantIslandMap;
 

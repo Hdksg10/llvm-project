@@ -216,13 +216,13 @@ void DataAggregator::start() {
 
   if (opts::ParseMemProfile)
     launchPerfProcess("mem events", MemEventsPPI,
-                      "script -F pid,event,addr,ip");
+                      "script -F pid,event,addr,ip -G");
 
   launchPerfProcess("process events", MMapEventsPPI,
-                    "script --show-mmap-events --no-itrace");
+                    "script --show-mmap-events -G --no-itrace");
 
   launchPerfProcess("task events", TaskEventsPPI,
-                    "script --show-task-events --no-itrace");
+                    "script --show-task-events -G --no-itrace");
 }
 
 void DataAggregator::abort() {
@@ -476,7 +476,7 @@ void DataAggregator::parsePerfData(BinaryContext &BC) {
               "not read one from input binary\n";
   }
 
-  if (true) {
+  if (BC.IsLinuxKernel) {
     // Current MMap parsing logic does not work with linux kernel.
     // MMap entries for linux kernel uses PERF_RECORD_MMAP
     // format instead of typical PERF_RECORD_MMAP2 format.
@@ -1167,32 +1167,41 @@ ErrorOr<DataAggregator::PerfBasicSample> DataAggregator::parseBasicSample() {
     return EC;
 
   auto MMapInfoIter = BinaryMMapInfo.find(*PIDRes);
-  if (MMapInfoIter == BinaryMMapInfo.end()) {
+  if (!BC->IsLinuxKernel && MMapInfoIter == BinaryMMapInfo.end()) {
     consumeRestOfLine();
     return PerfBasicSample{StringRef(), 0};
   }
 
   while (checkAndConsumeFS()) {
   }
-
   ErrorOr<StringRef> Event = parseString(FieldSeparator);
   if (std::error_code EC = Event.getError())
     return EC;
-
   while (checkAndConsumeFS()) {
   }
 
   ErrorOr<uint64_t> AddrRes = parseHexField(FieldSeparator, true);
   if (std::error_code EC = AddrRes.getError())
     return EC;
-
   if (!checkAndConsumeNewLine()) {
     reportError("expected end of line");
     return make_error_code(llvm::errc::io_error);
   }
-
   uint64_t Address = *AddrRes;
-  if (!BC->HasFixedLoadAddress)
+  if (BC->IsLinuxKernel) {
+    // The MMap parsing logic does not work with the Linux kernel due to PERF_RECORD_MMAP entries.  
+    // Therefore, we cannot adjust addresses using MMapInfoIter->second when KASLR is enabled.  
+    // With KASLR, the kernel text is loaded to a random location in the vmalloc region, but the offset  
+    // between the runtime and link-time addresses is consistent across all symbols.  
+    // This means we can compute the offset by comparing the address of the '_stext' symbol  
+    // in vmlinux with its address in /proc/kallsyms, and then subtract the offset from a  
+    // runtime address to map it back to the original link-time address.  
+    uint64_t RuntimeText = BC->KernelTextStartAArch64Runtime;
+    uint64_t LinkText = BC->KernelTextStartAArch64Binary;
+    uint64_t KASLRDelta = RuntimeText - LinkText;
+    Address -= KASLRDelta;
+  }
+  else if (!BC->HasFixedLoadAddress)
     adjustAddress(Address, MMapInfoIter->second);
 
   return PerfBasicSample{Event.get(), Address};
