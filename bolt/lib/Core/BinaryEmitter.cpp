@@ -540,9 +540,12 @@ void BinaryEmitter::emitConstantIslands(BinaryFunction &BF, bool EmitColdPart,
 
   // AArch64 requires CI to be aligned to 8 bytes due to access instructions
   // restrictions. E.g. the ldr with imm, where imm must be aligned to 8 bytes.
-  const uint16_t Alignment = OnBehalfOf
-                                 ? OnBehalfOf->getConstantIslandAlignment()
-                                 : BF.getConstantIslandAlignment();
+  // const uint16_t Alignment = OnBehalfOf
+  //                                ? OnBehalfOf->getConstantIslandAlignment()
+  //                                : BF.getConstantIslandAlignment();
+  // FIXME: just fix alignment to 4 bytes for now
+  const uint16_t Alignment = 4;
+  outs() << "emitConstantIslands: " << Alignment << "\n";
   Streamer.emitCodeAlignment(Align(Alignment), &*BC.STI);
 
   if (!OnBehalfOf) {

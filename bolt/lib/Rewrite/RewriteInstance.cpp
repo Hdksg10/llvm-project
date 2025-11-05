@@ -1263,6 +1263,11 @@ void RewriteInstance::discoverFileObjects() {
 
       BF = BC->createBinaryFunction(UniqueName, *Section, SymbolAddress,
                                     SymbolSize);
+      auto E = BF->readKCFIHash();
+      if (E) {
+        BC->errs() << "BOLT-ERROR: Failed to read KCFI hash for function " << UniqueName << "\n";
+        exit(1);
+      }
       if (!IsSimple)
         BF->setSimple(false);
     }
@@ -1464,26 +1469,6 @@ Error RewriteInstance::discoverRtFiniAddress() {
   return createStringError(std::errc::not_supported,
                            "No relocation for first DT_FINI_ARRAY slot");
 }
-// void RewriteInstance::_discoverKallSysms() {
-
-//   BC->outs() << "BOLT-INFO: discovering kallsyms\n";
-
-//   std::string KernelASLROffsetFile = "/proc/kallsyms";
-//   if (opts::KallsysmsFile.empty()) {
-//     BC->errs() << "BOLT-ERROR: kallsyms file not specified\n";
-//     exit(1);
-//   } else {
-//     BC->outs() << "BOLT-INFO: using kallsyms file: " << opts::KallsysmsFile << "\n";
-//   }
-
-//   if (!sys::fs::exists(opts::KallsysmsFile)) {
-//     BC->errs() << "BOLT-ERROR: kallsyms file not found: " << opts::KallsysmsFile
-//                << '\n';
-//     exit(1);
-//   } else {
-//     BC->outs() << "BOLT-INFO: kallsyms file found: " << opts::KallsysmsFile << "\n";
-//   }
-// }
 
 void RewriteInstance::discoverKallsyms() {
   if (!BC->IsLinuxKernel)
@@ -1944,7 +1929,7 @@ void RewriteInstance::adjustFunctionBoundaries() {
             BFE = BC->getBinaryFunctions().end();
        BFI != BFE; ++BFI) {
     BinaryFunction &Function = BFI->second;
-    const BinaryFunction *NextFunction = nullptr;
+    BinaryFunction *NextFunction = nullptr;
     if (std::next(BFI) != BFE)
       NextFunction = &std::next(BFI)->second;
 
@@ -1997,7 +1982,14 @@ void RewriteInstance::adjustFunctionBoundaries() {
     if (NextFunction)
       NextObjectAddress =
           std::min(NextFunction->getAddress(), NextObjectAddress);
-
+    // Check if the next function have kCFI hash
+    if (NextFunction && NextFunction->hasKCFIHash() && NextObjectAddress == NextFunction->getAddress()) {
+      NextObjectAddress = NextObjectAddress - 4;
+      if (NextObjectAddress - Function.getAddress() < Function.getSize()) {
+        NextObjectAddress += 4;
+        NextFunction->clearKCFIHash();
+      }
+    }
     const uint64_t MaxSize = NextObjectAddress - Function.getAddress();
     if (MaxSize < Function.getSize()) {
       BC->errs() << "BOLT-ERROR: symbol seen in the middle of the function "
@@ -3252,6 +3244,10 @@ void RewriteInstance::selectFunctionsToProcess() {
       if (Function.hasNameRegex(Name))
         return true;
     if (BC->HasRelocations && Function.mustKeepAddress())
+      return true;
+    if (Function.hasNameRegex("__kvm_nvhe_"))
+      return true;
+    if (Function.hasNameRegex("__pi_"))
       return true;
     return false;
   };

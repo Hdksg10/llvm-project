@@ -456,6 +456,9 @@ private:
 
   /// Function is referenced by a non-control flow instruction.
   bool HasAddressTaken{false};
+  
+  /// Function kCFI hash if kCFI is enabled
+  uint32_t KCFIHash{0};
 
   /// Get basic block index assuming it belongs to this function.
   unsigned getIndex(const BinaryBasicBlock *BB) const {
@@ -2257,6 +2260,35 @@ public:
 
   bool hasConstantIsland() const {
     return Islands && !Islands->DataOffsets.empty();
+  }
+
+  bool hasKCFIHash() const {
+    return KCFIHash != 0;
+  }
+
+  void clearKCFIHash() {
+    KCFIHash = 0;
+  }
+
+  Error readKCFIHash() {
+    ErrorOr<BinarySection &> Section = BC.getSectionForAddress(Address);
+    if (!Section) {
+      BC.errs() << "BOLT-ERROR: Section not found for address 0x" << Twine::utohexstr(Address) << " in function " << getPrintName() << "\n";
+      return createFatalBOLTError(
+          "Section not found for address 0x" + Twine::utohexstr(Address) +
+          " in function " + getPrintName());
+    }
+    const uint64_t SectionAddress = Section->getAddress();
+    StringRef Bytes = Section->getContents();
+    if (Address < SectionAddress + 4) {
+      BC.errs() << "BOLT-WARNING: KCFI hash not found at address 0x" << Twine::utohexstr(Address) << " in function " << getPrintName() << "\n";
+      return Error::success();
+    }
+    const uint64_t Offset = Address - SectionAddress - 4;
+    std::array<uint8_t, 4> HashBytesArray;
+    std::copy(Bytes.bytes_begin() + Offset, Bytes.bytes_begin() + Offset + 4, HashBytesArray.begin());
+    KCFIHash = support::endian::read32le(HashBytesArray.begin());
+    return Error::success();
   }
 
   bool isStartOfConstantIsland(uint64_t Offset) const {
