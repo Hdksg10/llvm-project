@@ -2064,7 +2064,7 @@ Error LinuxKernelRewriter::updateStaticKeysJumpTablePostEmit() {
     }
 
     // Check if we need to convert jump instruction into a nop.
-    if (Info.Nop)
+    if (!Info.Nop)
       continue;
 
     SmallString<15> NopCode;
