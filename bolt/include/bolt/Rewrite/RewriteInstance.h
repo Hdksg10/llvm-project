@@ -308,6 +308,9 @@ private:
   /// Update loadable segment information based on new sections.
   void updateSegmentInfo();
 
+  /// Update section range symbols and their page aligned addresses.
+  void updateRangeSymbols();
+
   /// Patch ELF book-keeping info.
   void patchELFPHDRTable();
 
@@ -508,6 +511,9 @@ private:
 
   /// FILE symbols used for disambiguating split function parents.
   std::vector<ELFSymbolRef> FileSymbols;
+
+  /// Value of range symbols in rewritten Linux Kernel Binary.
+  std::unordered_map<std::string, uint64_t> RangeSymbolsValue;
 
   std::unique_ptr<DWARFRewriter> DebugInfoRewriter;
 

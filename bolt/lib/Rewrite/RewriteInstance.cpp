@@ -3931,6 +3931,10 @@ void RewriteInstance::mapFileSections(BOLTLinker::SectionMapper MapSection) {
       exit(1);
     }
   }
+
+  // Update section range symbols and their page aligned addresses for AArch64 Linux Kernel Binary.
+  if (BC->IsLinuxKernel && BC->isAArch64())
+    updateRangeSymbols();
 }
 
 std::vector<BinarySection *> RewriteInstance::getCodeSections() {
@@ -4494,6 +4498,35 @@ void RewriteInstance::patchELFPHDRTable() {
   }
 
   OS.seek(SavedPos);
+}
+
+void RewriteInstance::updateRangeSymbols() {
+  BinarySection *EHFrameSection = getSection(getNewSecPrefix() + getEHFrameSectionName());
+  if (!EHFrameSection)
+    return;
+
+  const uint64_t EHFrameStart = EHFrameSection->getOutputAddress();
+  const uint64_t EHFrameEnd = EHFrameStart + EHFrameSection->getOutputSize();
+  const uint64_t EHFrameStartPage = EHFrameStart & ~0xFFF;
+  const uint64_t EHFrameEndPage = EHFrameEnd & ~0xFFF;
+  const int64_t EHFrameStartPageOffset = EHFrameStart - EHFrameStartPage;
+  const int64_t EHFrameEndPageOffset = EHFrameEnd - EHFrameEndPage;
+
+  // Update .eh_frame_start|end symbols
+  RangeSymbolsValue["__eh_frame_start"] = EHFrameStart;
+  RangeSymbolsValue["__eh_frame_end"] = EHFrameEnd;
+
+  BC->registerNameAtAddress("__eh_frame_end_page", EHFrameEndPage, 0, 0);
+  BC->registerNameAtAddress("__eh_frame_start_page", EHFrameStartPage, 0, 0);
+  BC->registerNameAtAddress("__eh_frame_end", EHFrameEnd, 0, 0);
+  BC->registerNameAtAddress("__eh_frame_start", EHFrameStart, 0, 0);
+
+  BC->registerNameAtAddress("__eh_frame_end_page_offset", EHFrameEndPageOffset, 0, 0);
+  BC->registerNameAtAddress("__eh_frame_start_page_offset", EHFrameStartPageOffset, 0, 0);
+
+  // Update _end address
+  BC->registerNameAtAddress("_end_page", (NextAvailableAddress & ~0xFFF), 0, 0);
+  BC->registerNameAtAddress("_end_page_offset", (NextAvailableAddress - (NextAvailableAddress & ~0xFFF)), 0, 0);
 }
 
 namespace {
@@ -5167,6 +5200,10 @@ void RewriteInstance::updateELFSymbolTable(
       goto registerSymbol;
     }
 
+    if (RangeSymbolsValue.find(SymbolName->str()) != RangeSymbolsValue.end()) {
+      updateSymbolValue(*SymbolName, RangeSymbolsValue[SymbolName->str()]);
+      goto registerSymbol;
+    }
     if (Function) {
       // If the symbol matched a function that was not emitted, update the
       // corresponding section index but otherwise leave it unchanged.

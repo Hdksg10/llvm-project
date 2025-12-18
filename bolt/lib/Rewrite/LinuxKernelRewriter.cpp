@@ -295,6 +295,50 @@ class LinuxKernelRewriter final : public MetadataRewriter {
   ErrorOr<BinarySection &> PCIFixupSection = std::errc::bad_address;
   static constexpr size_t PCI_FIXUP_ENTRY_SIZE = 16;
 
+  /// Functions that are safe to restore symbol references.
+  static constexpr std::array<StringRef, 2> FUNCTIONS_SAFE_TO_RESTORE = {
+    "scs_patch_vmlinux",
+    "create_kernel_mapping",
+  };
+  
+  /// These range symbols are defined in vmlinux.ld.S, and should be assigned to a new address if we change the section or layout.
+  static constexpr std::array<StringRef, 3> SYMBOLS_SAFE_TO_RESTORE = {
+    "__eh_frame_start",
+    "__eh_frame_end",
+    "_end",
+  };
+
+  /// Map of section range symbols and their page aligned addresses.
+  std::unordered_map<uint64_t, StringRef> RangeSymbols;
+
+  /// Check if the function is safe to restore.
+  static bool isFunctionSafeToRestore(const BinaryFunction& BF) {
+    // Remove the bolt suffix from the function name like "foo/1" -> "foo"
+    auto StripBoltSuffix = [](StringRef N) -> StringRef {
+      auto [Base, Suffix] = N.rsplit('/');
+      if (!Suffix.empty() && llvm::all_of(Suffix, llvm::isDigit))
+        return Base;
+      return N;
+    };
+  
+    return BF.forEachName([&](StringRef Name) {
+             return llvm::is_contained(FUNCTIONS_SAFE_TO_RESTORE,
+                                       StripBoltSuffix(Name));
+           }).has_value();
+  }
+  
+  /// Process all functions in the binary and restore symbol references if safe
+  Error processFunctionsSymbolReferences();
+
+  /// Restore symbol references in the function.
+  Error restoreSymbolReferences(BinaryFunction& BF, std::unordered_map<std::string, unsigned int> &OpcodeNameToValue);
+  
+  // Set functions that are safe to restore symbol references as simple, so that we can emit them
+  Error processFunctionsSymbolReferencesPreEmit();
+
+  /// Read all section range symbols and their page aligned addresses
+  Error readSectionRangeSymbols();
+
   Error detectLinuxKernelVersion();
 
   /// Process linux kernel special sections and their relocations.
@@ -366,6 +410,15 @@ public:
       return E;
     auto ShouldIgnore = [this](const BinaryFunction &Function) {
       std::optional<StringRef> SectionName = Function.getOriginSectionName();
+      // There are lots of functions in .rodata.text and .init.text section have references to section range
+      // symbols like _end, __eh_frame_start, etc. These symbols are defined in vmlinux.ld.S, and should be assigned to a new address if we change the section.
+      // This function checks if the function in these sections is safe to restore symbol references. We will replace the imm operand in adr, adrp-add instructions with symbol reference, and update address in JITLinker.
+      // Or replace symbol reference in adr instruction with another page aligned reference.
+      // But we will NOT OPTIMIZE these functions in any passes.
+      if ((SectionName == ".init.text" || SectionName == ".rodata.text") && isFunctionSafeToRestore(Function)) {
+        return false;
+      }
+
       if (!SectionName || *SectionName != ".text")
         return true;
 
@@ -425,11 +478,17 @@ public:
     if (Error E = readStaticKeysJumpTable())
       return E;
 
+    if (Error E = readSectionRangeSymbols())
+      return E;
+
     return Error::success();
   }
 
   Error postCFGInitializer() override {
     if (Error E = processORCPostCFG())
+      return E;
+
+    if (Error E = processFunctionsSymbolReferences())
       return E;
 
     processAltInstructionsPostCFG();
@@ -459,6 +518,9 @@ public:
       return E;
 
     processInstructionFixups();
+    
+    if (Error E = processFunctionsSymbolReferencesPreEmit())
+      return E;
 
     return Error::success();
   }
@@ -1007,6 +1069,232 @@ Error LinuxKernelRewriter::validateORCTables() {
     PrevIP = IP;
   }
 
+  return Error::success();
+}
+
+Error LinuxKernelRewriter::readSectionRangeSymbols() {
+  for (auto &Entry : BC.GlobalSymbols) {
+    auto Name = Entry.getKey();
+    auto Address = Entry.getValue()->getAddress();
+    if (llvm::is_contained(SYMBOLS_SAFE_TO_RESTORE, Name)) {
+      LLVM_DEBUG(dbgs() << "BOLT-DEBUG: section range symbol: " << Name << " address: 0x" << Twine::utohexstr(Address) << "\n");
+      RangeSymbols.insert({Address, Name});
+    }
+  }
+  return Error::success();
+}
+
+Error LinuxKernelRewriter::processFunctionsSymbolReferences() {
+  // Map opcode name to opcode value
+  std::unordered_map<std::string, unsigned int> OpcodeNameToValue;
+  for (unsigned int Index = 0; Index < BC.MII->getNumOpcodes(); Index++) {
+    OpcodeNameToValue[BC.MII->getName(Index).str()] = Index;
+  }
+  for (auto &BF : llvm::make_second_range(BC.getBinaryFunctions())) {
+    if (isFunctionSafeToRestore(BF)) {
+      if (Error E = restoreSymbolReferences(BF, OpcodeNameToValue))
+        return E;
+      // We do not want to optimize these functions, so set them as non-simple
+      // NOTE: Some pass may not check the simple flag, be cautious when add new functions to SAFE_TO_RELOCATE list
+      BF.setSimple(false);
+    }
+  }
+  return Error::success();
+}
+
+Error LinuxKernelRewriter::restoreSymbolReferences(BinaryFunction& BF, std::unordered_map<std::string, unsigned int> &OpcodeNameToValue) {
+
+  auto ReplaceAdrpWithSymbol = [&](MCInst &Inst, const char *SymName) {
+    const MCSymbol *PageSym =
+        BC.getOrCreateUndefinedGlobalSymbol(SymName);
+    int64_t OldVal = 0;
+    bool Changed = BC.MIB->replaceImmWithSymbolRef(
+        Inst,
+        PageSym,
+        /*Addend=*/0,
+        BC.Ctx.get(),
+        OldVal,
+        ELF::R_AARCH64_ADR_PREL_PG_HI21);
+
+    if (Changed) {
+        LLVM_DEBUG(dbgs() << "BOLT-DEBUG: ADRP imm replaced with expr for " << SymName <<  " with Old value: " << OldVal << "\n");
+    }
+    return Changed;
+  };
+  auto ReplaceAddWithSymbol = [&](MCInst &Inst, const char *SymName) {
+    const MCSymbol *PageSym =
+        BC.getOrCreateUndefinedGlobalSymbol(SymName);
+    int64_t OldVal = 0;
+    bool Changed = BC.MIB->replaceImmWithSymbolRef(
+        Inst,
+        PageSym,
+        /*Addend=*/0,
+        BC.Ctx.get(),
+        OldVal,
+        ELF::R_AARCH64_ADD_ABS_LO12_NC);
+
+    if (Changed) {
+        LLVM_DEBUG(dbgs() << "BOLT-DEBUG: ADD imm replaced with expr for " << SymName <<  " with Old value: " << OldVal << "\n");
+    }
+    return Changed;
+  };
+
+  auto FindBinaryDataSymbolByNameContainingAddress = [&](StringRef SymbolName, uint64_t Address)-> const MCSymbol * {
+    auto* BD = BC.getBinaryDataContainingAddress(Address);
+    if (!BD) {
+      return nullptr;
+    }
+    // A binary data may have multiple symbols, we need to find the one that matches the symbol name
+    for (auto *Symbol : BD->getSymbols()) {
+      if (Symbol && Symbol->getName() == SymbolName) {
+        return Symbol;
+      }
+    }
+    return nullptr;
+  };
+
+  auto FindRangeSymbolWithAddressByPageAddress = [&](uint64_t PageAddress)-> std::pair<const MCSymbol *, uint64_t> {
+    if (auto RSI = llvm::find_if(RangeSymbols,
+      [&](const auto& KV) {
+      return (KV.first & ~0xFFFULL) == (PageAddress);
+      });
+      RSI != RangeSymbols.end()
+    ) 
+    {
+      const auto& [SymbolAddress, SymbolName] = *RSI;
+      return {FindBinaryDataSymbolByNameContainingAddress(SymbolName, SymbolAddress), SymbolAddress};
+    } 
+    return {nullptr, 0};
+  };
+
+  auto FindRangeSymbolWithAddressByAddress = [&](uint64_t Address)-> std::pair<const MCSymbol *, uint64_t> {
+    if (auto RSI = llvm::find_if(RangeSymbols,
+      [&](const auto& KV) {
+      return KV.first == Address;
+      });
+      RSI != RangeSymbols.end()
+    ) 
+    {
+      const auto& [SymbolAddress, SymbolName] = *RSI;
+      return {FindBinaryDataSymbolByNameContainingAddress(SymbolName, SymbolAddress), SymbolAddress};
+    } 
+    return {nullptr, 0};
+  };
+
+  LLVM_DEBUG(dbgs() << "BOLT-DEBUG: Relocating function: " << BF.getOneName() << " address: 0x" << Twine::utohexstr(BF.getAddress()) << "\n");
+  
+  for (auto &BB : BF.blocks()) {
+    auto Cur = BB.getInputOffset() + BF.getAddress();
+    for (auto &Inst: BB.instructions()){
+      if (BC.InstPrinter->getOpcodeName(Inst.getOpcode()) == "ADRP") {
+        // Imm in adrp should be shifted left by 12 bits
+        auto Offset = (Inst.getOperand(1).getImm()) << 12;
+        auto Address = (Cur & ~0xFFF) + Offset;
+        auto [Symbol, SymbolAddress] = FindRangeSymbolWithAddressByPageAddress(Address);
+        if (Symbol) {
+          auto SymbolName = Symbol->getName().str();
+          LLVM_DEBUG(dbgs() << "BOLT-DEBUG: Found symbol: " << SymbolName << " for ADRP instruction at address: 0x" << Twine::utohexstr(Cur) << "\n");
+          auto SymbolPageName = SymbolName + "_page";
+          auto SymbolPageOffsetName = SymbolName + "_page_offset";
+          auto TargetRegisterID = Inst.getOperand(0).getReg().id();
+          // Find following ADDXri instruction in all successor blocks by DFS and replace the addend with the symbol 
+          bool Found = false;
+          // If symbol address is already a page address, do not need to find the ADDXri instruction
+          if (SymbolAddress == Address) {
+            Found = true;
+          }
+          std::stack<BinaryBasicBlock *> Stack;
+          DenseSet<const BinaryBasicBlock *> Visited;
+          Stack.push(&BB);
+          while (!Stack.empty()) {
+            if (Found) {
+              // Found the ADDXri instruction, do not continue
+              break;
+            }
+            auto *CurBB = Stack.top();
+            Stack.pop();
+            Visited.insert(CurBB);
+            for (auto &Inst : CurBB->instructions()) {
+              if (BC.InstPrinter->getOpcodeName(Inst.getOpcode()) == "ADDXri"
+                  && Inst.getNumOperands() == 4 
+                  && Inst.getOperand(1).isReg() 
+                  && Inst.getOperand(2).isImm()) {
+                auto ADDXriSourceRegisterID = Inst.getOperand(1).getReg().id();
+                if (ADDXriSourceRegisterID != TargetRegisterID) {
+                  continue;
+                }
+                // Double check the addend
+                auto Addend = Inst.getOperand(2).getImm();
+                if (Addend != (int64_t)(SymbolAddress - Address)) {
+                  LLVM_DEBUG(dbgs() << "BOLT-DEBUG: Addend mismatch for ADDXri instruction at address: 0x" << Twine::utohexstr(Cur) << "\n");
+                  continue;
+                }
+                ReplaceAddWithSymbol(Inst, SymbolPageOffsetName.c_str());
+                Found = true;
+                break;
+              }
+            }
+            // Add all successor blocks to the stack
+            for (auto *Succ : CurBB->successors()) {
+              if (!Visited.count(Succ)) {
+                Stack.push(Succ);
+              }
+            }
+          }
+          if (Found) {
+            ReplaceAdrpWithSymbol(Inst, SymbolPageName.c_str());
+          }
+        }
+      }
+      else if (BC.InstPrinter->getOpcodeName(Inst.getOpcode()) == "ADR") {
+        // TODO: We assume all symbols we need to relocate are page aligned for now, so we can replace ADR with single ADRP instruction.
+        // If not, we need to insert venners to load the page address and then add the offset to get the final address.
+        auto &Operand = Inst.getOperand(1);
+        if (Operand.isExpr()) {
+          auto *Symbol = BC.MIB->getTargetSymbol(Operand.getExpr());
+          if (Symbol && llvm::find_if(RangeSymbols, [&](const auto& KV) {
+                                      return KV.second == Symbol->getName().str();
+                                      }) != RangeSymbols.end()
+             ) {
+            LLVM_DEBUG(dbgs() << "BOLT-DEBUG: Found symbol: " << Symbol->getName().str() << " for ADR instruction at address: 0x" << Twine::utohexstr(Cur) << "\n");
+            Inst.setOpcode(OpcodeNameToValue["ADRP"]);
+            auto SymbolName = Symbol->getName().str();
+            auto SymbolPageName = SymbolName + "_page";
+            const MCSymbol *PageSym = BC.getOrCreateUndefinedGlobalSymbol(SymbolPageName.c_str());
+            BC.MIB->setOperandToSymbolRef(Inst, 1, PageSym, 0, BC.Ctx.get(), ELF::R_AARCH64_ADR_PREL_PG_HI21);
+          }
+        }
+        else if (Operand.isImm()) {
+          auto Offset = Operand.getImm();
+          auto Address = Cur + Offset;
+          auto [Symbol, SymbolAddress] = FindRangeSymbolWithAddressByAddress(Address);
+          if (Symbol) {
+            Inst.setOpcode(OpcodeNameToValue["ADRP"]);
+            auto SymbolName = Symbol->getName().str();
+            LLVM_DEBUG(dbgs() << "BOLT-DEBUG: Found symbol: " << SymbolName << " for ADR instruction at address: 0x" << Twine::utohexstr(Cur) << "\n");
+            auto SymbolPageName = SymbolName + "_page";
+            ReplaceAdrpWithSymbol(Inst, SymbolPageName.c_str());
+          }
+        }
+      }
+      else {
+        LLVM_DEBUG(dbgs() << "BOLT-DEBUG: Inst name: " << BC.InstPrinter->getOpcodeName(Inst.getOpcode()) << "\n");
+      }
+      // Update the current instruction address
+      Cur += BC.computeInstructionSize(Inst);
+    }
+  }
+
+  return Error::success();
+}
+
+Error LinuxKernelRewriter::processFunctionsSymbolReferencesPreEmit() {
+  for (auto &BF : llvm::make_second_range(BC.getBinaryFunctions())) {
+    if (!isFunctionSafeToRestore(BF))
+      continue;
+    // Set the function is simple, so that we can emit it
+    BF.setSimple(true);
+  }
   return Error::success();
 }
 

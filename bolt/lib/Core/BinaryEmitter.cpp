@@ -916,6 +916,12 @@ void BinaryEmitter::emitCFIInstruction(const MCCFIInstruction &Inst) const {
   case MCCFIInstruction::OpUndefined:
     Streamer.emitCFIUndefined(Inst.getRegister());
     break;
+  case MCCFIInstruction::OpRememberState:
+    Streamer.emitCFIRememberState(SMLoc());
+    break;
+  case MCCFIInstruction::OpRestoreState:
+    Streamer.emitCFIRestoreState(SMLoc());
+    break;
   }
 }
 
