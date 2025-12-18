@@ -545,7 +545,6 @@ void BinaryEmitter::emitConstantIslands(BinaryFunction &BF, bool EmitColdPart,
   //                                : BF.getConstantIslandAlignment();
   // FIXME: just fix alignment to 4 bytes for now
   const uint16_t Alignment = 4;
-  outs() << "emitConstantIslands: " << Alignment << "\n";
   Streamer.emitCodeAlignment(Align(Alignment), &*BC.STI);
 
   if (!OnBehalfOf) {

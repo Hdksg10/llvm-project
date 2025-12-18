@@ -2296,30 +2296,30 @@ Error LinuxKernelRewriter::updateStaticKeysJumpTablePostEmit() {
     BinaryFunction *BF = Info.BF;
     if (!BF || !BF->isEmitted())
       continue;
-      std::optional<uint64_t> JumpAddress = lookupSymbol(Label->getName());
-      assert(JumpAddress && "missing static key jump instruction label");
-  
-      uint64_t ContentsAddress{0};
-      uint64_t ContentsSize{0};
-      MutableArrayRef<uint8_t> Contents;
-  
-      if (!BC.HasRelocations) {
-        const FunctionFragment *FF =
-            BF->getFunctionFragmentForOutputAddress(*JumpAddress);
-        assert(FF && "Can not get fragment for jump address");
-  
-        ContentsAddress = FF->getAddress();
-        ContentsSize = FF->getImageSize();
-        Contents = MutableArrayRef<uint8_t>(FF->getOutputData(), ContentsSize);
-      } else {
-        ErrorOr<BinarySection &> Sec =
-            BC.getSectionForOutputAddress(*JumpAddress);
-        assert(Sec && "Can not get section for jump address.");
-  
-        ContentsAddress = Sec->getOutputAddress();
-        ContentsSize = Sec->getOutputSize();
-        Contents = MutableArrayRef<uint8_t>(Sec->getOutputData(), ContentsSize);
-      }
+    std::optional<uint64_t> JumpAddress = lookupSymbol(Label->getName());
+    assert(JumpAddress && "missing static key jump instruction label");
+
+    uint64_t ContentsAddress{0};
+    uint64_t ContentsSize{0};
+    MutableArrayRef<uint8_t> Contents;
+
+    if (!BC.HasRelocations) {
+      const FunctionFragment *FF =
+          BF->getFunctionFragmentForOutputAddress(*JumpAddress);
+      assert(FF && "Can not get fragment for jump address");
+
+      ContentsAddress = FF->getAddress();
+      ContentsSize = FF->getImageSize();
+      Contents = MutableArrayRef<uint8_t>(FF->getOutputData(), ContentsSize);
+    } else {
+      ErrorOr<BinarySection &> Sec =
+          BC.getSectionForOutputAddress(*JumpAddress);
+      assert(Sec && "Can not get section for jump address.");
+
+      ContentsAddress = Sec->getOutputAddress();
+      ContentsSize = Sec->getOutputSize();
+      Contents = MutableArrayRef<uint8_t>(Sec->getOutputData(), ContentsSize);
+    }
 
     MCInst Inst;
     uint64_t Size;
