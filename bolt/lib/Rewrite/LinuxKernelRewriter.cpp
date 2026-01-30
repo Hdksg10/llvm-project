@@ -1866,6 +1866,18 @@ Error LinuxKernelRewriter::readAltInstructions() {
                   << *AltBF << '\n';
       AltBF->setIgnored();
     }
+    else if (BC.isAArch64()) {
+      // If the alternative instruction sequence is not in any function, adjust the function's max size to make sure it does NOT include the alternative instruction sequence.
+      // Set UseMaxSize to true to use the function's max size when searching for the function.
+      BinaryFunction *AltBF = BC.getBinaryFunctionContainingAddress(Entry.AltInstrAddr, false, true);
+      if (AltBF) {
+        // Do not ignore the function we always need to process in FUNCTIONS_SAFE_TO_RESTORE.
+        if (llvm::find(FUNCTIONS_SAFE_TO_RESTORE, AltBF->getOneName()) == FUNCTIONS_SAFE_TO_RESTORE.end()) {
+          AltBF->setIgnored();
+          BC.outs() << "BOLT-INFO: ignoring alternative instruction sequence in function " << *AltBF << " at address 0x" << Twine::utohexstr(Entry.AltInstrAddr) << '\n';
+        }
+      }
+    }
 
     if (!BF || !BF->hasInstructions())
       continue;
