@@ -1016,6 +1016,20 @@ BinaryFunction::processIndirectBranch(MCInst &Instruction, unsigned Size,
   return BranchType;
 }
 
+MCSymbol *BinaryFunction::getLocalLabel(uint64_t Address,
+                                        bool CreatePastEnd) {
+  const uint64_t Offset = Address - getAddress();
+
+  if ((Offset == getSize()) && CreatePastEnd)
+    return getFunctionEndLabel();
+
+  auto LI = Labels.find(Offset);
+  if (LI != Labels.end())
+    return LI->second;
+
+  return nullptr;
+}
+
 MCSymbol *BinaryFunction::getOrCreateLocalLabel(uint64_t Address,
                                                 bool CreatePastEnd) {
   const uint64_t Offset = Address - getAddress();
@@ -2300,7 +2314,24 @@ Error BinaryFunction::buildCFG(MCPlusBuilder::AllocatorIdTy AllocatorId) {
   for (auto I = Instructions.begin(), E = Instructions.end(); I != E; ++I) {
     const uint32_t Offset = I->first;
     MCInst &Instr = I->second;
-
+    if (BC.isAArch64() && !BC.getUniqueSectionByName(".rela" + std::string(BC.getMainCodeSectionName()))){
+      if (!BC.MIB->isPseudo(Instr) && BC.MIB->isADRP(Instr) &&
+        Instr.getOperand(0).isReg() && Instr.getOperand(1).isImm()) {
+        MIB->setOffset(Instr, static_cast<uint32_t>(Offset));
+        //BC.outs()<<"Adrp Instr(buildCFG):0x"<<Twine::utohexstr(getAddress()+Offset)<<" ";
+        //Instr.dump_pretty(BC.outs(), BC.InstPrinter.get());
+        //BC.outs()<<"\n";
+      }
+      
+      if (!BC.MIB->isPseudo(Instr) && BC.MIB->isAddXri(Instr) &&
+        Instr.getOperand(0).isReg() && Instr.getOperand(1).isReg() && Instr.getOperand(2).isImm()) {
+        MIB->setOffset(Instr, static_cast<uint32_t>(Offset));
+        MIB->addAnnotation(Instr, "AddImm", static_cast<int64_t>( Instr.getOperand(2).getImm()), AllocatorId);
+        // BC.outs()<<"Add Instr(buildCFG):0x"<<Twine::utohexstr(getAddress()+Offset)<<" ";
+        // Instr.dump_pretty(BC.outs(), BC.InstPrinter.get());
+        // BC.outs()<<"\n";
+      }
+    }
     auto LI = Labels.find(Offset);
     if (LI != Labels.end()) {
       // Always create new BB at branch destination.
@@ -2525,9 +2556,13 @@ void BinaryFunction::postProcessCFG() {
   // later. This has no cost, since annotations are allocated by a bumpptr
   // allocator and won't be released anyway until late in the pipeline.
   if (!requiresAddressTranslation() && !opts::Instrument) {
-    for (BinaryBasicBlock &BB : blocks())
-      for (MCInst &Inst : BB)
-        BC.MIB->clearOffset(Inst);
+    for (BinaryBasicBlock &BB : blocks()) {
+      for (MCInst &Inst : BB) {
+        if (!BC.MIB->isADRP(Inst) && !BC.MIB->isAddXri(Inst)) {
+          BC.MIB->clearOffset(Inst);
+        }
+      }
+    }
   }
 
   assert((!isSimple() || validateCFG()) &&

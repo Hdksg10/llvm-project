@@ -11,6 +11,7 @@ add_llvm_library(LLVMBOLTPasses
   FrameAnalysis.cpp
   FrameOptimizer.cpp
   FixRelaxationPass.cpp
+  FixRelocationPass.cpp
   FixRISCVCallsPass.cpp
   HFSort.cpp
   Hugify.cpp

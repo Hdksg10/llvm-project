@@ -14,6 +14,7 @@
 #include "bolt/Passes/CMOVConversion.h"
 #include "bolt/Passes/FixRISCVCallsPass.h"
 #include "bolt/Passes/FixRelaxationPass.h"
+#include "bolt/Passes/FixRelocationPass.h"
 #include "bolt/Passes/FrameOptimizer.h"
 #include "bolt/Passes/Hugify.h"
 #include "bolt/Passes/IdenticalCodeFolding.h"
@@ -83,6 +84,11 @@ cl::opt<bool>
 
 cl::opt<bool> NeverPrint("never-print", cl::desc("never print"),
                          cl::ReallyHidden, cl::cat(BoltOptCategory));
+
+static cl::opt<bool>
+PrintFixRelocations("print-fix-relocations",
+  cl::desc("print functions after fix relaxations pass"),
+  cl::Hidden, cl::cat(BoltOptCategory));
 
 cl::opt<bool>
 PrintAfterBranchFixup("print-after-branch-fixup",
@@ -360,6 +366,9 @@ Error BinaryFunctionPassManager::runAllPasses(BinaryContext &BC) {
 
   if (BC.isAArch64())
     Manager.registerPass(std::make_unique<MarkRAStates>());
+  
+  if (BC.isAArch64())
+    Manager.registerPass(std::make_unique<FixRelocations>(PrintFixRelocations));  
 
   Manager.registerPass(
       std::make_unique<EstimateEdgeCounts>(PrintEstimateEdgeCounts));
@@ -451,7 +460,7 @@ Error BinaryFunctionPassManager::runAllPasses(BinaryContext &BC) {
   Manager.registerPass(std::make_unique<EliminateUnreachableBlocks>(PrintUCE),
                        opts::EliminateUnreachable);
 
-  Manager.registerPass(std::make_unique<SplitFunctions>(PrintSplit));
+  // Manager.registerPass(std::make_unique<SplitFunctions>(PrintSplit));
 
   Manager.registerPass(std::make_unique<LoopInversionPass>());
 
@@ -468,15 +477,15 @@ Error BinaryFunctionPassManager::runAllPasses(BinaryContext &BC) {
   // This pass should come close to last since it uses the estimated hot
   // size of a function to determine the order.  It should definitely
   // also happen after any changes to the call graph are made, e.g. inlining.
-  Manager.registerPass(
-      std::make_unique<ReorderFunctions>(PrintReorderedFunctions));
+  // Manager.registerPass(
+  //     std::make_unique<ReorderFunctions>(PrintReorderedFunctions));
 
   // This is the second run of the SplitFunctions pass required by certain
   // splitting strategies (e.g. cdsplit). Running the SplitFunctions pass again
   // after ReorderFunctions allows the finalized function order to be utilized
   // to make more sophisticated splitting decisions, like hot-warm-cold
   // splitting.
-  Manager.registerPass(std::make_unique<SplitFunctions>(PrintSplit));
+  // Manager.registerPass(std::make_unique<SplitFunctions>(PrintSplit));
 
   // Print final dyno stats right while CFG and instruction analysis are intact.
   Manager.registerPass(std::make_unique<DynoStatsPrintPass>(

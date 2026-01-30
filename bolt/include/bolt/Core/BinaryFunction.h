@@ -1078,6 +1078,9 @@ public:
         forEachName([&](StringRef Name) { return Name == FunctionName; });
     return Res.has_value();
   }
+  
+  /// Return a label at a given \p Address in the function. 
+  MCSymbol *getLocalLabel(uint64_t Address, bool CreatePastEnd = false);
 
   /// Check if any of function names matches the given regex.
   std::optional<StringRef> hasNameRegex(const StringRef NameRegex) const;
