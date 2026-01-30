@@ -3263,6 +3263,10 @@ void RewriteInstance::selectFunctionsToProcess() {
         if (Function.hasNameRegex(Name))
           return true;
 
+      for (std::string &Name : opts::ForceFunctionNames)
+          if (Function.hasRestoredNameRegex(Name))
+            return true;
+
       // Non-regex check (-funcs-no-regex and -funcs-file-no-regex).
       for (const StringRef Name : Function.getNames())
         if (ForceFunctionsNR.count(Name.str()))
