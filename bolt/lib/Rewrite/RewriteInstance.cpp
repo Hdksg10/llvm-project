@@ -4505,32 +4505,50 @@ void RewriteInstance::patchELFPHDRTable() {
 }
 
 void RewriteInstance::updateRangeSymbols() {
-  BinarySection *EHFrameSection = getSection(getNewSecPrefix() + getEHFrameSectionName());
-  if (!EHFrameSection)
-    return;
+  BC->outs() << "BOLT-DEBUG: updating range symbols\n";
+  BinarySection *NewEHFrameSection = getSection(getNewSecPrefix() + getEHFrameSectionName());
+  BinarySection *RelocatedEHFrameSection = getSection(".relocated" + getEHFrameSectionName());
+  if (NewEHFrameSection && RelocatedEHFrameSection) {
+    const uint64_t EHFrameStart = NewEHFrameSection->getOutputAddress();
+    const uint64_t EHFrameEnd = EHFrameStart + NewEHFrameSection->getOutputSize() + RelocatedEHFrameSection->getOutputSize();
+    const uint64_t EHFrameStartPage = EHFrameStart & ~0xFFF;
+    const uint64_t EHFrameEndPage = EHFrameEnd & ~0xFFF;
+    const int64_t EHFrameStartPageOffset = EHFrameStart - EHFrameStartPage;
+    const int64_t EHFrameEndPageOffset = EHFrameEnd - EHFrameEndPage; 
 
-  const uint64_t EHFrameStart = EHFrameSection->getOutputAddress();
-  const uint64_t EHFrameEnd = EHFrameStart + EHFrameSection->getOutputSize();
-  const uint64_t EHFrameStartPage = EHFrameStart & ~0xFFF;
-  const uint64_t EHFrameEndPage = EHFrameEnd & ~0xFFF;
-  const int64_t EHFrameStartPageOffset = EHFrameStart - EHFrameStartPage;
-  const int64_t EHFrameEndPageOffset = EHFrameEnd - EHFrameEndPage;
+    BC->outs() << "BOLT-DEBUG: EHFrameStart: 0x" << Twine::utohexstr(EHFrameStart) << "\n";
+    BC->outs() << "BOLT-DEBUG: EHFrameEnd: 0x" << Twine::utohexstr(EHFrameEnd) << "\n";
+    BC->outs() << "BOLT-DEBUG: EHFrameStartPage: 0x" << Twine::utohexstr(EHFrameStartPage) << "\n";
+    BC->outs() << "BOLT-DEBUG: EHFrameEndPage: 0x" << Twine::utohexstr(EHFrameEndPage) << "\n";
+    BC->outs() << "BOLT-DEBUG: EHFrameStartPageOffset: 0x" << Twine::utohexstr(EHFrameStartPageOffset) << "\n";
+    BC->outs() << "BOLT-DEBUG: EHFrameEndPageOffset: 0x" << Twine::utohexstr(EHFrameEndPageOffset) << "\n";
 
-  // Update .eh_frame_start|end symbols
-  RangeSymbolsValue["__eh_frame_start"] = EHFrameStart;
-  RangeSymbolsValue["__eh_frame_end"] = EHFrameEnd;
+    // Update .eh_frame_start|end symbols
+    RangeSymbolsValue["__eh_frame_start"] = EHFrameStart;
+    RangeSymbolsValue["__eh_frame_end"] = EHFrameEnd;
 
-  BC->registerNameAtAddress("__eh_frame_end_page", EHFrameEndPage, 0, 0);
-  BC->registerNameAtAddress("__eh_frame_start_page", EHFrameStartPage, 0, 0);
-  BC->registerNameAtAddress("__eh_frame_end", EHFrameEnd, 0, 0);
-  BC->registerNameAtAddress("__eh_frame_start", EHFrameStart, 0, 0);
+    BC->registerNameAtAddress("__eh_frame_end_page", EHFrameEndPage, 0, 0);
+    BC->registerNameAtAddress("__eh_frame_start_page", EHFrameStartPage, 0, 0);
+    BC->registerNameAtAddress("__eh_frame_end", EHFrameEnd, 0, 0);
+    BC->registerNameAtAddress("__eh_frame_start", EHFrameStart, 0, 0);
 
-  BC->registerNameAtAddress("__eh_frame_end_page_offset", EHFrameEndPageOffset, 0, 0);
-  BC->registerNameAtAddress("__eh_frame_start_page_offset", EHFrameStartPageOffset, 0, 0);
-
+    BC->registerNameAtAddress("__eh_frame_end_page_offset", EHFrameEndPageOffset, 0, 0);
+    BC->registerNameAtAddress("__eh_frame_start_page_offset", EHFrameStartPageOffset, 0, 0);
+  }
+  else {
+    if (NewEHFrameSection) {
+      BC->outs() << "BOLT-DEBUG: no relocated .eh_frame section\n";
+    }
+    if (RelocatedEHFrameSection) {
+      BC->outs() << "BOLT-DEBUG: no new .eh_frame section\n";
+    }
+  }
   // Update _end address
   BC->registerNameAtAddress("_end_page", (NextAvailableAddress & ~0xFFF), 0, 0);
   BC->registerNameAtAddress("_end_page_offset", (NextAvailableAddress - (NextAvailableAddress & ~0xFFF)), 0, 0);
+  BC->outs() << "BOLT-DEBUG: _end address: 0x" << Twine::utohexstr(NextAvailableAddress) << "\n";
+  BC->outs() << "BOLT-DEBUG: _end page: 0x" << Twine::utohexstr(NextAvailableAddress & ~0xFFF) << "\n";
+  BC->outs() << "BOLT-DEBUG: _end page offset: 0x" << Twine::utohexstr(NextAvailableAddress - (NextAvailableAddress & ~0xFFF)) << "\n";
 }
 
 namespace {
