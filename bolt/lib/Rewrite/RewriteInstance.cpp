@@ -1372,7 +1372,7 @@ void RewriteInstance::discoverFileObjects() {
             BC->getBinaryFunctionContainingAddress(RelAddress,
                                                    /*CheckPastEnd*/ false,
                                                    /*UseMaxSize*/ true);
-        if (BF) {
+        if (BF && !BC->IsLinuxKernel) {
           assert(Rel.isRelative() && "Expected relative relocation for island");
           BC->logBOLTErrorsAndQuitOnFatal(
               BF->markIslandDynamicRelocationAtAddress(RelAddress));
