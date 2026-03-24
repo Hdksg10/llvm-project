@@ -742,6 +742,9 @@ public:
 
   virtual bool isTerminator(const MCInst &Inst) const;
 
+  /// Return true if \p Inst is an AArch64 UBSan trap (`brk #0x55xx`).
+  virtual bool isUBSanitizerTrap(const MCInst &Inst) const;
+
   virtual bool isNoop(const MCInst &Inst) const {
     llvm_unreachable("not implemented");
     return false;

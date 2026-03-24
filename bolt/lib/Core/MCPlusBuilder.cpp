@@ -137,6 +137,10 @@ bool MCPlusBuilder::isTerminator(const MCInst &Inst) const {
          (opts::TerminalTrap && Info->get(Inst.getOpcode()).isTrap());
 }
 
+bool MCPlusBuilder::isUBSanitizerTrap(const MCInst &Inst) const {
+  return false;
+}
+
 void MCPlusBuilder::setTailCall(MCInst &Inst) const {
   assert(!hasAnnotation(Inst, MCAnnotation::kTailCall));
   setAnnotationOpValue(Inst, MCAnnotation::kTailCall, true);

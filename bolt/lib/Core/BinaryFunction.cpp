@@ -3778,8 +3778,16 @@ void BinaryFunction::postProcessBranches() {
                    << BB.getName() << " in function " << *this << '\n');
         continue;
       }
+      /// Clang lowers UBSan trap-mode checks (`-fsanitize-trap=`) to
+      /// target-specific trap instructions; see
+      /// clang/docs/UndefinedBehaviorSanitizer.html and
+      /// clang/lib/CodeGen/Targets/AArch64.cpp.
+      ///
+      /// Recognizing these traps prevents BOLT from treating them as fallthrough
+      /// instructions and inserting a spurious `ret`.
       if (!BC.MIB->isTerminator(*LastInstrRI) &&
-          !BC.MIB->isCall(*LastInstrRI)) {
+          !BC.MIB->isCall(*LastInstrRI) &&
+          !BC.MIB->isUBSanitizerTrap(*LastInstrRI)) {
         LLVM_DEBUG(dbgs() << "BOLT-DEBUG: adding return to basic block "
                           << BB.getName() << " in function " << *this << '\n');
         MCInst ReturnInstr;

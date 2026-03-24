@@ -135,6 +135,50 @@ class AArch64MCPlusBuilder : public MCPlusBuilder {
 public:
   using MCPlusBuilder::MCPlusBuilder;
 
+  bool isUBSanitizerTrap(const MCInst &Inst) const override {
+    if (Inst.getOpcode() != AArch64::BRK || Inst.getNumOperands() != 1 ||
+        !Inst.getOperand(0).isImm())
+      return false;
+
+    constexpr int64_t SanitizerTrapMask = 0xFF00;
+    constexpr int64_t SanitizerTrapBase = 0x5500;
+    constexpr int64_t SanitizerHandlerMask = 0x00FF;
+    const int64_t Immediate = Inst.getOperand(0).getImm();
+    if ((Immediate & SanitizerTrapMask) != SanitizerTrapBase)
+      return false;
+
+    switch (Immediate & SanitizerHandlerMask) {
+    case 0x00:
+    case 0x01:
+    case 0x02:
+    case 0x03:
+    case 0x04:
+    case 0x05:
+    case 0x06:
+    case 0x07:
+    case 0x08:
+    case 0x09:
+    case 0x0A:
+    case 0x0B:
+    case 0x0C:
+    case 0x0D:
+    case 0x0E:
+    case 0x0F:
+    case 0x10:
+    case 0x11:
+    case 0x12:
+    case 0x13:
+    case 0x14:
+    case 0x15:
+    case 0x16:
+    case 0x17:
+    case 0x18:
+      return true;
+    default:
+      return false;
+    }
+  }
+
   std::unique_ptr<MCSymbolizer>
   createTargetSymbolizer(BinaryFunction &Function,
                          bool CreateNewSymbols) const override {
