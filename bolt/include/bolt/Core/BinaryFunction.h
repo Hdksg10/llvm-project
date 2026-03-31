@@ -166,6 +166,15 @@ public:
   using IslandProxiesType =
       std::map<BinaryFunction *, std::map<const MCSymbol *, MCSymbol *>>;
 
+  // Generic preserved-text kinds shared by the core. "Opaque" is an
+  // abstraction for raw in-function bytes that must move with the function but
+  // must not participate in CFG/code ownership. Kernel alt replacements are
+  // one user of this generic kind, which keeps that policy out of the core.
+  enum class PreservedTextKind : uint8_t {
+    ConstantIsland,
+    Opaque,
+  };
+
   struct IslandInfo {
     /// Temporary holder of offsets that are data markers (used in AArch)
     /// It is possible to have data in code sections. To ease the identification
@@ -175,6 +184,7 @@ public:
     /// all offsets of $d symbols and CodeOffsets all offsets of $x symbols.
     std::set<uint64_t> DataOffsets;
     std::set<uint64_t> CodeOffsets;
+    DenseMap<uint64_t, PreservedTextKind> DataOffsetKinds;
 
     /// List of relocations associated with data in the constant island
     std::map<uint64_t, Relocation> Relocations;
@@ -640,6 +650,36 @@ private:
     if (!Islands)
       Islands = std::make_unique<IslandInfo>();
     Islands->DataOffsets.emplace(Offset);
+    Islands->DataOffsetKinds[Offset] = PreservedTextKind::ConstantIsland;
+  }
+
+  /// Register preserved raw bytes inside the function that must not be treated
+  /// as regular code or constant islands.
+  void markOpaqueRangeInternal(uint64_t StartOffset, uint64_t EndOffset) {
+    // Check StartOffset, EndOffset and MaxSize
+    // BC.outs() << "BOLT-INFO: marking opaque range for " << getOneName() << " from 0x" << Twine::utohexstr(StartOffset) << " to 0x" << Twine::utohexstr(EndOffset) << '\n';
+    assert(StartOffset <= EndOffset  &&
+           "opaque range must be inside the function");
+    if (EndOffset > getMaxSize()) {
+      BC.outs() << "BOLT-INFO: EndOffset > MaxSize for " << getOneName() << ", adjusting MaxSize to EndOffset\n";
+      setMaxSize(EndOffset);
+    }
+    if (!Islands)
+      Islands = std::make_unique<IslandInfo>();
+
+    Islands->DataOffsets.emplace(StartOffset);
+    // Record the generic preserved-text kind so later core queries can treat
+    // this range like non-CFG text without knowing who registered it.
+    Islands->DataOffsetKinds[StartOffset] = PreservedTextKind::Opaque;
+    if (EndOffset < getMaxSize())
+      Islands->CodeOffsets.emplace(EndOffset);
+
+    for (auto Itr = Relocations.lower_bound(StartOffset),
+              End = Relocations.lower_bound(EndOffset);
+         Itr != End;) {
+      Islands->Relocations.emplace(Itr->first, Itr->second);
+      Itr = Relocations.erase(Itr);
+    }
   }
 
   /// Register an entry point at a given \p Offset into the function.
@@ -2102,6 +2142,54 @@ public:
 
   uint64_t getOutputColdDataAddress() const { return OutputColdDataOffset; }
 
+  /// Register preserved raw bytes inside the function.
+  void markOpaqueRange(uint64_t StartOffset, uint64_t EndOffset) {
+    markOpaqueRangeInternal(StartOffset, EndOffset);
+  }
+
+private:
+  std::optional<PreservedTextKind> getPreservedTextKind(uint64_t Address) const {
+    if (!Islands || Address < getAddress())
+      return std::nullopt;
+
+    const uint64_t Offset = Address - getAddress();
+    if (Offset >= getMaxSize())
+      return std::nullopt;
+
+    auto DataIter = Islands->DataOffsets.upper_bound(Offset);
+    if (DataIter == Islands->DataOffsets.begin())
+      return std::nullopt;
+    DataIter = std::prev(DataIter);
+
+    auto CodeIter = Islands->CodeOffsets.upper_bound(Offset);
+    if (CodeIter != Islands->CodeOffsets.begin() &&
+        *std::prev(CodeIter) > *DataIter)
+      return std::nullopt;
+
+    auto KindIter = Islands->DataOffsetKinds.find(*DataIter);
+    assert(KindIter != Islands->DataOffsetKinds.end() &&
+           "missing preserved text kind");
+    return KindIter->second;
+  }
+
+  MCSymbol *getOrCreatePreservedTextAccess(uint64_t Address, Twine Prefix,
+                                           uint64_t Size = 0) {
+    assert(Islands && "function expected to have preserved text");
+
+    const uint64_t Offset = Address - getAddress();
+    if (auto Itr = Islands->Offsets.find(Offset); Itr != Islands->Offsets.end())
+      return Itr->second;
+
+    // Shared core helper: preserved text still needs a stable symbol for
+    // relocations and address references, but the naming stays generic.
+    const std::string Name = (Prefix + "0x" + Twine::utohexstr(Address)).str();
+    MCSymbol *Symbol = BC.registerNameAtAddress(Name, Address, Size, 1);
+    Islands->Offsets[Offset] = Symbol;
+    Islands->Symbols.insert(Symbol);
+    return Symbol;
+  }
+
+public:
   /// If \p Address represents an access to a constant island managed by this
   /// function, return a symbol so code can safely refer to it. Otherwise,
   /// return nullptr. First return value is the symbol for reference in the
@@ -2109,26 +2197,19 @@ public:
   /// in the cold code area, as when the function is split the islands are
   /// duplicated.
   MCSymbol *getOrCreateIslandAccess(uint64_t Address) {
-    if (!Islands)
-      return nullptr;
-
-    MCSymbol *Symbol;
     if (!isInConstantIsland(Address))
       return nullptr;
+    return getOrCreatePreservedTextAccess(Address, "ISLANDat");
+  }
 
-    // Register our island at global namespace
-    Symbol = BC.getOrCreateGlobalSymbol(Address, "ISLANDat");
-
-    // Internal bookkeeping
-    const uint64_t Offset = Address - getAddress();
-    assert((!Islands->Offsets.count(Offset) ||
-            Islands->Offsets[Offset] == Symbol) &&
-           "Inconsistent island symbol management");
-    if (!Islands->Offsets.count(Offset)) {
-      Islands->Offsets[Offset] = Symbol;
-      Islands->Symbols.insert(Symbol);
-    }
-    return Symbol;
+  /// If \p Address represents an access to an opaque range managed by this
+  /// function, return a symbol so code can safely refer to it. Otherwise,
+  /// return nullptr.
+  MCSymbol *getOrCreateOpaqueRangeAccess(uint64_t Address, uint64_t Size = 0) {
+    if (!isInOpaqueRange(Address))
+      return nullptr;
+    // Core logic only knows this is preserved raw text, not why it exists.
+    return getOrCreatePreservedTextAccess(Address, "PRESERVEDat", Size);
   }
 
   /// Support dynamic relocations in constant islands, which may happen if
@@ -2188,27 +2269,17 @@ public:
   /// Detects whether \p Address is inside a data region in this function
   /// (constant islands).
   bool isInConstantIsland(uint64_t Address) const {
-    if (!Islands)
-      return false;
+    return getPreservedTextKind(Address) == PreservedTextKind::ConstantIsland;
+  }
 
-    if (Address < getAddress())
-      return false;
+  bool isInOpaqueRange(uint64_t Address) const {
+    return getPreservedTextKind(Address) == PreservedTextKind::Opaque;
+  }
 
-    uint64_t Offset = Address - getAddress();
-
-    if (Offset >= getMaxSize())
-      return false;
-
-    auto DataIter = Islands->DataOffsets.upper_bound(Offset);
-    if (DataIter == Islands->DataOffsets.begin())
-      return false;
-    DataIter = std::prev(DataIter);
-
-    auto CodeIter = Islands->CodeOffsets.upper_bound(Offset);
-    if (CodeIter == Islands->CodeOffsets.begin())
-      return true;
-
-    return *std::prev(CodeIter) <= *DataIter;
+  bool isInPreservedText(uint64_t Address) const {
+    // Shared predicate used by core passes that must avoid treating preserved
+    // raw bytes as ordinary CFG code.
+    return getPreservedTextKind(Address).has_value();
   }
 
   uint16_t getConstantIslandAlignment() const {
@@ -2229,7 +2300,7 @@ public:
     for (auto DataIter = Islands->DataOffsets.begin();
          DataIter != Islands->DataOffsets.end(); ++DataIter) {
       auto NextData = std::next(DataIter);
-      auto CodeIter = Islands->CodeOffsets.lower_bound(*DataIter);
+      auto CodeIter = Islands->CodeOffsets.upper_bound(*DataIter);
       if (CodeIter == Islands->CodeOffsets.end() &&
           NextData == Islands->DataOffsets.end()) {
         Size += getMaxSize() - *DataIter;
@@ -2258,10 +2329,19 @@ public:
   }
 
   bool hasIslandsInfo() const {
-    return Islands && (hasConstantIsland() || !Islands->Dependency.empty());
+    return Islands && (hasPreservedText() || !Islands->Dependency.empty());
   }
 
   bool hasConstantIsland() const {
+    return Islands &&
+           llvm::any_of(Islands->DataOffsetKinds, [](const auto &Entry) {
+             return Entry.second == PreservedTextKind::ConstantIsland;
+           });
+  }
+
+  bool hasPreservedText() const {
+    // This intentionally includes both constant islands and opaque preserved
+    // ranges so core emission/relocation logic can stay generic.
     return Islands && !Islands->DataOffsets.empty();
   }
 
@@ -2295,7 +2375,15 @@ public:
   }
 
   bool isStartOfConstantIsland(uint64_t Offset) const {
-    return hasConstantIsland() && Islands->DataOffsets.count(Offset);
+    return Islands && Islands->DataOffsets.count(Offset) &&
+           Islands->DataOffsetKinds.lookup(Offset) ==
+               PreservedTextKind::ConstantIsland;
+  }
+
+  bool isStartOfOpaqueRange(uint64_t Offset) const {
+    return Islands && Islands->DataOffsets.count(Offset) &&
+           Islands->DataOffsetKinds.lookup(Offset) ==
+               PreservedTextKind::Opaque;
   }
 
   /// Return true iff the symbol could be seen inside this function otherwise

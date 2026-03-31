@@ -453,17 +453,14 @@ static bool shouldDisassemble(const BinaryFunction &BF) {
   auto name = BF.getOneName();
   // filter function starts with "__kvm_nvhe_$d"
   if (name.find("__kvm_nvhe_$d") != std::string::npos) {
-    // outs() << "BOLT-INFO: Function " << name << " is ignored\n";
     return false;
   }
   // filter function starts with "__kvm_nvhe_$x"
   if (name.find("__kvm_nvhe_$x") != std::string::npos) {
-    // outs() << "BOLT-INFO: Function " << name << " is ignored\n";
     return false;
   }
   // filter function starts with "__pi_$d"
   if (name.find("__pi_$d") != std::string::npos) {
-    // outs() << "BOLT-INFO: Function " << name << " is ignored\n";
     return false;
   }
   return !BF.isIgnored();
@@ -2595,7 +2592,9 @@ void RewriteInstance::readDynamicRelocations(const SectionRef &Section,
 
     if (Relocation::isRelative(RType) && SymbolAddress == 0) {
       if (Func) {
-        if (!Func->isInConstantIsland(ReferencedAddress)) {
+        // Shared metadata path: preserved text can live inside a function
+        // address range, but it must not grow the function entry-point set.
+        if (!Func->isInPreservedText(ReferencedAddress)) {
           if (const uint64_t ReferenceOffset =
                   ReferencedAddress - Func->getAddress()) {
             Func->addEntryPointAtOffset(ReferenceOffset);
@@ -2603,7 +2602,8 @@ void RewriteInstance::readDynamicRelocations(const SectionRef &Section,
         } else {
           BC->errs() << "BOLT-ERROR: referenced address at 0x"
                      << Twine::utohexstr(ReferencedAddress)
-                     << " is in constant island of function " << *Func << "\n";
+                     << " is in preserved text range of function " << *Func
+                     << "\n";
           exit(1);
         }
       }

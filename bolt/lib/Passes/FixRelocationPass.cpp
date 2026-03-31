@@ -92,7 +92,10 @@ void FixRelocations::runOnFunction(BinaryFunction &BF) {
             BinaryFunction *IncludedBF =
                 BC.getBinaryFunctionContainingAddress(baseAddr + addImm);
 
-            if (TargetBF || (IncludedBF && !IncludedBF->isInConstantIsland(baseAddr + addImm))) {
+            // Core relocation repair must not reinterpret preserved raw
+            // bytes as normal in-function code targets.
+            if (TargetBF || (IncludedBF &&
+                             !IncludedBF->isInPreservedText(baseAddr + addImm))) {
               if (!findAdrpAddPattern) {
                 findAdrpAddPattern = true;
                 //BC.outs()<<"0x"<<Twine::utohexstr(baseAddr + addImm) <<":isInConstantIsland(Address):" <<IncludedBF->isInConstantIsland(baseAddr + addImm)<<"\n";

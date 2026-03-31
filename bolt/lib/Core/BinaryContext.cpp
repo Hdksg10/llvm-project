@@ -439,6 +439,11 @@ BinaryContext::handleAddressRef(uint64_t Address, BinaryFunction &BF,
     if (MCSymbol *IslandSym = BF.getOrCreateIslandAccess(Address))
       return std::make_pair(IslandSym, 0);
 
+    // Core preserved-text hook: opaque ranges resolve to synthetic symbols
+    // so the generic address-ref logic does not create code entry points.
+    if (MCSymbol *OpaqueSym = BF.getOrCreateOpaqueRangeAccess(Address))
+      return std::make_pair(OpaqueSym, 0);
+
     // Detect custom code written in assembly that refers to arbitrary
     // constant islands from other functions. Write this reference so we
     // can pull this constant island and emit it as part of this function

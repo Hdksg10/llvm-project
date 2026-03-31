@@ -1041,10 +1041,13 @@ MCSymbol *BinaryFunction::getOrCreateLocalLabel(uint64_t Address,
   if (LI != Labels.end())
     return LI->second;
 
-  // For AArch64, check if this address is part of a constant island.
+  // Core label creation must treat preserved text as non-CFG bytes, or we
+  // would accidentally manufacture local code labels inside it.
   if (BC.isAArch64()) {
     if (MCSymbol *IslandSym = getOrCreateIslandAccess(Address))
       return IslandSym;
+    if (MCSymbol *OpaqueSym = getOrCreateOpaqueRangeAccess(Address))
+      return OpaqueSym;
   }
 
   MCSymbol *Label = BC.Ctx->createNamedTempSymbol();
@@ -1928,10 +1931,10 @@ void BinaryFunction::postProcessEntryPoints() {
     if (BC.isAArch64() && Offset == getSize())
       continue;
 
-    // If we have grabbed a wrong code label which actually points to some
-    // constant island inside the function, ignore this label and remove it
-    // from the secondary entry point map.
-    if (isStartOfConstantIsland(Offset)) {
+    // Shared cleanup for preserved text: if a discovered label lands at the
+    // start of preserved raw bytes, drop it instead of keeping a fake entry
+    // point in the CFG.
+    if (isStartOfConstantIsland(Offset) || isStartOfOpaqueRange(Offset)) {
       BC.SymbolToFunctionMap.erase(Label);
       removeSymbolFromSecondaryEntryPointMap(Label);
       continue;
@@ -2052,8 +2055,9 @@ bool BinaryFunction::validateExternallyReferencedOffsets() {
     // Ignore __builtin_unreachable().
     if (Destination == getSize())
       continue;
-    // Ignore constant islands
-    if (isInConstantIsland(Destination + getAddress()))
+    // Shared validation rule: preserved raw bytes are emitted with the
+    // function, but they are not valid CFG destinations.
+    if (isInPreservedText(Destination + getAddress()))
       continue;
 
     if (BinaryBasicBlock *BB = getBasicBlockAtOffset(Destination)) {
@@ -4469,7 +4473,7 @@ void BinaryFunction::updateOutputValues(const BOLTLinker &Linker) {
   setOutputSize(SymbolInfo->Size);
 
   if (BC.HasRelocations || isInjected()) {
-    if (hasConstantIsland()) {
+    if (hasPreservedText()) {
       const auto IslandLabelSymInfo =
           Linker.lookupSymbolInfo(getFunctionConstantIslandLabel()->getName());
       assert(IslandLabelSymInfo && "Cannot find function CI symbol");
@@ -4841,7 +4845,9 @@ void BinaryFunction::addRelocation(uint64_t Address, MCSymbol *Symbol,
   LLVM_DEBUG(dbgs() << "BOLT-DEBUG: addRelocation in "
                     << formatv("{0}@{1:x} against {2}\n", *this, Offset,
                                (Symbol ? Symbol->getName() : "<undef>")));
-  bool IsCI = BC.isAArch64() && isInConstantIsland(Address);
+  // Core relocation routing keeps relocations that belong to preserved raw
+  // bytes with the preserved-text payload instead of the CFG instruction map.
+  bool IsCI = BC.isAArch64() && isInPreservedText(Address);
   std::map<uint64_t, Relocation> &Rels =
       IsCI ? Islands->Relocations : Relocations;
   if (BC.MIB->shouldRecordCodeRelocation(RelType))

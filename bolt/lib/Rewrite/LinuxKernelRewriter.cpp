@@ -20,8 +20,10 @@
 #include "llvm/Support/BinaryStreamWriter.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Endian.h"
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/ErrorOr.h"
+#include <algorithm>
 #include <regex>
 
 #define DEBUG_TYPE "bolt-linux"
@@ -277,6 +279,9 @@ class LinuxKernelRewriter final : public MetadataRewriter {
     uint64_t AltInstrAddr{0};
     uint8_t Instrlen{0};
     uint8_t Replacementlen{0};
+    BinaryFunction *OrgBF{nullptr};
+    BinaryFunction *AltBF{nullptr};
+    MCSymbol *AltSymbol{nullptr};
   };
   std::vector<AltInstrEntry> AltInstrEntries;
 
@@ -390,6 +395,7 @@ class LinuxKernelRewriter final : public MetadataRewriter {
   /// Handle alternative instruction info from .altinstructions.
   Error readAltInstructions();
   void processAltInstructionsPostCFG();
+  Error rewriteAltInstructions();
   Error tryReadAltInstructions(uint32_t AltInstFeatureSize,
                                bool AltInstHasPadLen, bool ParseOnly);
 
@@ -506,6 +512,9 @@ public:
       return E;
 
     if (Error E = rewriteORCTables())
+      return E;
+
+    if (Error E = rewriteAltInstructions())
       return E;
 
     if (Error E = rewriteStaticCalls())
@@ -764,6 +773,9 @@ Error LinuxKernelRewriter::readORCTables() {
     const uint64_t Offset = IP - BF->getAddress();
     MCInst *Inst = BF->getInstructionAtOffset(Offset);
     if (!Inst) {
+      if (BC.isAArch64() && BF->isInOpaqueRange(IP))
+        continue;
+
       // Check if there is an alternative instruction(s) at this IP. Multiple
       // alternative instructions can take a place of a single original
       // instruction and each alternative can have a separate ORC entry.
@@ -776,7 +788,7 @@ Error LinuxKernelRewriter::readORCTables() {
       // As such, we can ignore alternative ORC entries. They will be preserved
       // in the binary, but will not get printed in the instruction stream.
       Inst = BF->getInstructionContainingOffset(Offset);
-      if (Inst || BC.MIB->hasAnnotation(*Inst, "AltInst"))
+      if (Inst)
         continue;
 
       return createStringError(
@@ -1814,6 +1826,8 @@ Error LinuxKernelRewriter::readAltInstructions() {
       BC.AsmInfo->isLittleEndian(), BC.AsmInfo->getCodePointerSize());
   AddressExtractor::Cursor Cursor(0);
   uint64_t EntryID = 0;
+  DenseMap<BinaryFunction *, SmallVector<std::pair<uint64_t, uint64_t>, 2>>
+      AltInstrRanges;
   while (Cursor && !AE.eof(Cursor)) {
     ++EntryID;
     AltInstrEntries.push_back(AltInstrEntry());
@@ -1848,16 +1862,16 @@ Error LinuxKernelRewriter::readAltInstructions() {
       return createStringError(errc::executable_format_error,
                                "error reading .altinstructions");
 
-    BinaryFunction *BF =
-    BC.getBinaryFunctionContainingAddress(Entry.OrgInstrAddr);
+    BinaryFunction *BF = BC.getBinaryFunctionContainingAddress(Entry.OrgInstrAddr);
+    Entry.OrgBF = BF;
     if (!BF && opts::Verbosity) {
       BC.outs() << "BOLT-INFO: no function matches address 0x"
                 << Twine::utohexstr(Entry.OrgInstrAddr)
                 << " of instruction from .altinstructions\n";
     }
 
-    BinaryFunction *AltBF =
-      BC.getBinaryFunctionContainingAddress(Entry.AltInstrAddr);
+    // Where alternative instruction sequence is located
+    BinaryFunction *AltBF = BC.getBinaryFunctionContainingAddress(Entry.AltInstrAddr);
     if (AltBF) {
       if (BC.isX86() &&
           !AltBF->getOneName().starts_with(".altinstr_replacement"))
@@ -1865,17 +1879,17 @@ Error LinuxKernelRewriter::readAltInstructions() {
                      "function "
                   << *AltBF << '\n';
       AltBF->setIgnored();
-    }
-    else if (BC.isAArch64()) {
-      // If the alternative instruction sequence is not in any function, adjust the function's max size to make sure it does NOT include the alternative instruction sequence.
-      // Set UseMaxSize to true to use the function's max size when searching for the function.
-      BinaryFunction *AltBF = BC.getBinaryFunctionContainingAddress(Entry.AltInstrAddr, false, true);
+    } else if (BC.isAArch64()) {
+      // AArch64 keeps replacement bytes in .text, frequently inside a nearby
+      // function's max-size envelope instead of a dedicated replacement
+      // function.
+      AltBF =
+          BC.getBinaryFunctionContainingAddress(Entry.AltInstrAddr, false, true);
       if (AltBF) {
-        // Do not ignore the function we always need to process in FUNCTIONS_SAFE_TO_RESTORE.
-        if (llvm::find(FUNCTIONS_SAFE_TO_RESTORE, AltBF->getOneName()) == FUNCTIONS_SAFE_TO_RESTORE.end()) {
-          AltBF->setIgnored();
-          BC.outs() << "BOLT-INFO: ignoring alternative instruction sequence in function " << *AltBF << " at address 0x" << Twine::utohexstr(Entry.AltInstrAddr) << '\n';
-        }
+        Entry.AltBF = AltBF;
+        AltInstrRanges[AltBF].emplace_back(
+            Entry.AltInstrAddr,
+            Entry.AltInstrAddr + static_cast<uint64_t>(Entry.Replacementlen));
       }
     }
 
@@ -1914,6 +1928,54 @@ Error LinuxKernelRewriter::readAltInstructions() {
     }
   }
 
+  // Merge overlapping ranges
+  if (BC.isAArch64()) {
+    for (auto &RangesEntry : AltInstrRanges) {
+      BinaryFunction *AltBF = RangesEntry.first;
+      auto &Ranges = RangesEntry.second;
+      llvm::sort(Ranges, [](const auto &LHS, const auto &RHS) {
+        return LHS.first < RHS.first;
+      });
+
+      uint64_t Start = 0;
+      uint64_t End = 0;
+      bool HaveRange = false;
+      for (const auto &[RangeStart, RangeEnd] : Ranges) {
+        if (!HaveRange) {
+          Start = RangeStart;
+          End = RangeEnd;
+          HaveRange = true;
+          continue;
+        }
+
+        if (RangeStart <= End) {
+          End = std::max(End, RangeEnd);
+          continue;
+        }
+        BC.outs() << "BOLT-INFO: marking opaque range for " << AltBF->getOneName() << " from 0x" << Twine::utohexstr(Start) << " to 0x" << Twine::utohexstr(End) << '\n';
+        AltBF->markOpaqueRange(Start - AltBF->getAddress(),
+                               End - AltBF->getAddress());
+        BC.outs() << "BOLT-INFO: marked opaque range for " << AltBF->getOneName() << '\n';
+        Start = RangeStart;
+        End = RangeEnd;
+      }
+
+      if (HaveRange) {
+        BC.outs() << "BOLT-INFO: marking opaque range for " << AltBF->getOneName() << " from 0x" << Twine::utohexstr(Start) << " to 0x" << Twine::utohexstr(End) << '\n';
+        AltBF->markOpaqueRange(Start - AltBF->getAddress(),
+                               End - AltBF->getAddress());
+        BC.outs() << "BOLT-INFO: marked opaque range for " << AltBF->getOneName() << '\n';
+      }
+    }
+
+    for (AltInstrEntry &Entry : AltInstrEntries) {
+      if (!Entry.AltBF)
+        continue;
+      Entry.AltSymbol = Entry.AltBF->getOrCreateOpaqueRangeAccess(
+          Entry.AltInstrAddr, Entry.Replacementlen);
+    }
+  }
+
   BC.outs() << "BOLT-INFO: parsed " << EntryID
             << " alternative instruction entries\n";
 
@@ -1925,6 +1987,48 @@ void LinuxKernelRewriter::processAltInstructionsPostCFG() {
   // the rewrite support is complete. Alt instructions can modify the control
   // flow, hence we may end up deleting seemingly unreachable code.
   skipFunctionsWithAnnotation("AltInst");
+}
+
+Error LinuxKernelRewriter::rewriteAltInstructions() {
+  if (!BC.isAArch64() || !AltInstrSection || AltInstrEntries.empty())
+    return Error::success();
+
+  BinarySection &Section = *AltInstrSection;
+  const size_t Size = Section.getSize();
+  auto *NewContents = new uint8_t[Size];
+  std::copy_n(reinterpret_cast<const uint8_t *>(Section.getContents().data()),
+              Size, NewContents);
+  Section.updateContents(NewContents, Size);
+  Section.setOutputFileOffset(Section.getInputFileOffset());
+
+  for (const AltInstrEntry &Entry : AltInstrEntries) {
+    const uint64_t OrgOffset = Entry.Offset;
+    const uint64_t AltOffset = Entry.Offset + 4;
+    Section.removeRelocationAt(OrgOffset);
+    Section.removeRelocationAt(AltOffset);
+
+    MCSymbol *OrgLabel = nullptr;
+    if (Entry.OrgBF && BC.shouldEmit(*Entry.OrgBF) &&
+        Entry.OrgBF->hasInstructions()) {
+      if (MCInst *Inst = Entry.OrgBF->getInstructionAtOffset(
+              Entry.OrgInstrAddr - Entry.OrgBF->getAddress())) {
+        OrgLabel = BC.MIB->getOrCreateInstLabel(*Inst, "__ALT_ORG_",
+                                                BC.Ctx.get());
+      }
+    }
+    if (OrgLabel) {
+      support::endian::write32le(NewContents + OrgOffset, 0U);
+      Section.addRelocation(OrgOffset, OrgLabel, Relocation::getPC32(), 0);
+    }
+
+    if (Entry.AltBF && Entry.AltSymbol && BC.shouldEmit(*Entry.AltBF)) {
+      support::endian::write32le(NewContents + AltOffset, 0U);
+      Section.addRelocation(AltOffset, Entry.AltSymbol, Relocation::getPC32(),
+                            0);
+    }
+  }
+
+  return Error::success();
 }
 
 /// When the Linux kernel needs to handle an error associated with a given PCI

@@ -577,9 +577,14 @@ void BinaryEmitter::emitConstantIslands(BinaryFunction &BF, bool EmitColdPart,
     uint64_t FunctionOffset = *DataIter;
     uint64_t EndOffset = 0ULL;
 
-    // Determine size of this data chunk
+    // Determine size of this data chunk. We use upper_bound() so an internal
+    // code boundary at the same offset as the preserved-text start does not
+    // collapse the chunk to zero bytes and skip symbol emission.
+    // Note: raw $d/$x markers in vmlinux do not appear to share addresses, but
+    // this code runs on BOLT's merged preserved-text state, and synthetic
+    // preserved-text boundary/symbol interactions have not been fully verified.
     auto NextData = std::next(DataIter);
-    auto CodeIter = Islands.CodeOffsets.lower_bound(*DataIter);
+    auto CodeIter = Islands.CodeOffsets.upper_bound(*DataIter);
     if (CodeIter == Islands.CodeOffsets.end() &&
         NextData == Islands.DataOffsets.end())
       EndOffset = BF.getMaxSize();
